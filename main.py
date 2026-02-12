@@ -16,18 +16,15 @@ from rapidfuzz import fuzz
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Oprava pre Postgres (Render posiela 'postgres://', ale SQLAlchemy potrebuje 'postgresql://')
+# Oprava pre Postgres: Render posiela 'postgres://', ale SQLAlchemy vyžaduje 'postgresql://'
 if DATABASE_URL:
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    # Poistka pre SSL (Render Postgres ho vyžaduje)
+    # Render Postgres vyžaduje SSL šifrovanie
     if "?" not in DATABASE_URL:
         DATABASE_URL += "?sslmode=require"
 
-# Ak premenná chýba, vypíšeme chybu do logov, ale nezrútime hneď celý server
-if not DATABASE_URL:
-    print("⚠️ CHYBA: Premenná DATABASE_URL nie je nastavená!")
-
+# Vytvorenie pripojenia k databáze
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -41,7 +38,7 @@ class Product(Base):
     store = Column(String)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-# Vytvorenie tabuliek v databáze
+# Automatické vytvorenie tabuliek pri štarte
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -49,17 +46,12 @@ app = FastAPI()
 # --- POMOCNÉ FUNKCIE ---
 
 def analyzuj_cez_gemini(text_z_ocr, obchod):
-    """Použije Gemini AI na vyčistenie a štruktúrovanie dát z letáku."""
+    """Použije Gemini AI na vyčistenie dát z letáku."""
     if not GEMINI_API_KEY:
         return []
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    prompt = f"""
-    Si nákupný asistent Dunko. Z textu letáku obchodu {obchod} vytiahni zoznam produktov.
-    Vráť IBA čistý zoznam vo formáte: Názov produktu|Cena
-    Ignoruj reklamy a balast. Ak je tam akcia 1+1, vypočítaj cenu za kus.
-    Text: {text_z_ocr}
-    """
+    prompt = f"Si Dunko. Z textu letáku {obchod} vytiahni: Názov produktu|Cena. Text: {text_z_ocr}"
     
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     try:
@@ -83,83 +75,46 @@ def analyzuj_cez_gemini(text_z_ocr, obchod):
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return """
-    <!DOCTYPE html>
-    <html lang="sk">
-    <head>
-        <title>Dunko 2.0 - Inteligentný Nákup</title>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            :root { --primary: #2563eb; --secondary: #7c3aed; --bg: #f8fafc; }
-            body { font-family: sans-serif; background: var(--bg); margin: 0; padding: 20px; color: #1e293b; }
-            .container { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }
-            h2 { text-align: center; color: #2563eb; }
-            .settings { display: flex; gap: 10px; margin-bottom: 15px; }
-            input, select, textarea { width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 12px; box-sizing: border-box; }
-            textarea { height: 100px; margin-bottom: 15px; }
-            .btn { width: 100%; padding: 15px; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; color: white; margin-bottom: 10px; }
-            .btn-blue { background: var(--primary); }
-            .btn-purple { background: var(--secondary); }
-            .shop-card { margin-top: 20px; border: 1px solid #e2e8f0; border-radius: 15px; background: #fff; }
-            .shop-head { background: #f1f5f9; padding: 12px; display: flex; justify-content: space-between; font-weight: bold; }
-            .prod-row { padding: 10px; border-bottom: 1px solid #f8fafc; display: flex; justify-content: space-between; }
-            .loader { text-align: center; display: none; padding: 20px; font-weight: bold; color: #2563eb; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h2>🐕 Dunko 2.0 Porovnávač</h2>
-            <div class="settings">
-                <input type="text" id="city" placeholder="Mesto" value="Skalica">
+    <html>
+        <head>
+            <title>Dunko 2.0</title>
+            <meta charset="UTF-8">
+            <style>
+                body { font-family: sans-serif; padding: 20px; background: #f0f2f5; }
+                .card { background: white; padding: 20px; border-radius: 15px; max-width: 500px; margin: auto; }
+                button { width: 100%; padding: 10px; background: #2563eb; color: white; border: none; border-radius: 8px; cursor: pointer; }
+                .loader { display: none; color: blue; font-weight: bold; text-align: center; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>🐕 Dunko Porovnávač</h2>
+                <textarea id="list" style="width:100%; height:100px;" placeholder="pivo, maslo..."></textarea><br><br>
+                <button onclick="search()">POROVNAŤ CENY</button>
+                <div id="loader" class="loader"><br>Dunko hľadá... 🐾</div>
+                <div id="res"></div>
             </div>
-            <textarea id="list" placeholder="pivo, maslo, mlieko..."></textarea>
-            <button class="btn btn-blue" onclick="search('multi')">KDE JE ČO NAJLACNEJŠIE?</button>
-            <div id="loader" class="loader">Dunko hľadá v letákoch... 🐾</div>
-            <div id="results"></div>
-        </div>
-        <script>
-            async function search(mode) {
-                const input = document.getElementById('list').value;
-                if(!input) return;
-                document.getElementById('loader').style.display = 'block';
-                document.getElementById('results').innerHTML = '';
-                
-                const items = input.split(',').map(i => i.trim());
-                try {
+            <script>
+                async function search() {
+                    const input = document.getElementById('list').value;
+                    document.getElementById('loader').style.display = 'block';
                     const res = await fetch('/compare', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({items, city: document.getElementById('city').value})
+                        body: JSON.stringify({items: input.split(','), city: 'Skalica'})
                     });
                     const data = await res.json();
-                    render(data.results);
-                } catch (e) { alert("Chyba!"); }
-                document.getElementById('loader').style.display = 'none';
-            }
-
-            function render(results) {
-                const resultsDiv = document.getElementById('results');
-                let byShop = {};
-                results.forEach(r => {
-                    if(r.matches && r.matches.length > 0) {
-                        const m = r.matches[0];
-                        if(!byShop[m.store]) byShop[m.store] = { items: [], total: 0 };
-                        byShop[m.store].items.push(m);
-                        byShop[m.store].total += m.price;
-                    }
-                });
-                let html = '';
-                for (const [shop, info] of Object.entries(byShop)) {
-                    html += `<div class="shop-card"><div class="shop-head"><span>🏢 ${shop}</span><span>${info.total.toFixed(2)}€</span></div>`;
-                    info.items.forEach(i => {
-                        html += `<div class="prod-row"><span>${i.name}</span><b>${i.price.toFixed(2)}€</b></div>`;
+                    let html = '';
+                    data.results.forEach(r => {
+                        if(r.matches.length > 0) {
+                            html += `<p><b>${r.item}:</b> ${r.matches[0].name} - ${r.matches[0].price}€ (${r.matches[0].store})</p>`;
+                        }
                     });
-                    html += '</div>';
+                    document.getElementById('res').innerHTML = html || 'Nič sa nenašlo.';
+                    document.getElementById('loader').style.display = 'none';
                 }
-                resultsDiv.innerHTML = html || '<p>Nenašli sa žiadne akcie.</p>';
-            }
-        </script>
-    </body>
+            </script>
+        </body>
     </html>
     """
 
@@ -172,7 +127,6 @@ def compare(req: SearchReq):
     db = SessionLocal()
     all_prods = db.query(Product).all()
     db.close()
-    
     results = []
     for user_item in req.items:
         matches = []
@@ -185,44 +139,30 @@ def compare(req: SearchReq):
 
 @app.get("/update-flyers")
 def update_flyers():
-    """Funkcia, ktorá naplní databázu z webových stránok."""
     db = SessionLocal()
     headers = {"User-Agent": "Mozilla/5.0"}
-    
     sources = [
         {"name": "Lidl", "url": "https://www.zlacnene.sk/obchod/lidl/"},
         {"name": "Kaufland", "url": "https://www.zlacnene.sk/obchod/kaufland/"},
-        {"name": "Tesco", "url": "https://www.zlacnene.sk/obchod/tesco/"},
-        {"name": "Billa", "url": "https://www.zlacnene.sk/obchod/billa/"}
+        {"name": "Tesco", "url": "https://www.zlacnene.sk/obchod/tesco/"}
     ]
-    
     added_count = 0
     for src in sources:
         try:
             res = requests.get(src["url"], headers=headers, timeout=10)
             soup = BeautifulSoup(res.text, "html.parser")
-            # Upravený selektor podľa aktuálnej štruktúry zlacnene.sk
-            items = soup.select(".polozka") 
-            
+            items = soup.select(".polozka")
             for item in items:
                 name_el = item.find(["h2", "h3"])
                 price_el = item.select_one(".cena")
                 if name_el and price_el:
-                    try:
-                        name = name_el.get_text(strip=True)
-                        price_str = price_el.get_text(strip=True).replace(",", ".")
-                        price = float(re.sub(r'[^\d.]', '', price_str))
-                        
-                        # Bezpečné generovanie ID
-                        clean_name = re.sub(r'[^\w]', '_', name)
-                        p_id = f"{src['name']}_{clean_name}_{price}"[:100]
-                        
-                        new_p = Product(id=p_id, name=name, price=price, store=src["name"])
-                        db.merge(new_p)
-                        added_count += 1
-                    except: continue
+                    name = name_el.get_text(strip=True)
+                    price = float(re.sub(r'[^\d.]', '', price_el.get_text(strip=True).replace(",", ".")))
+                    clean_name = re.sub(r'[^\w]', '_', name)
+                    p_id = f"{src['name']}_{clean_name}_{price}"[:100]
+                    db.merge(Product(id=p_id, name=name, price=price, store=src["name"]))
+                    added_count += 1
         except: continue
-    
     db.commit()
     db.close()
-    return {"status": f"Úspešne pridaných {added_count} produktov do skladu!"}
+    return {"status": f"Pridaných {added_count} produktov!"}

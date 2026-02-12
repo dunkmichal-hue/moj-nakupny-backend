@@ -1,8 +1,6 @@
 fastapi
 uvicorn
+sqlalchemy
+psycopg2-binary
 requests
-beautifulsoup4
-
 rapidfuzz
-pytesseract
-Pillow

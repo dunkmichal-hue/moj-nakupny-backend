@@ -2,4 +2,7 @@ fastapi
 uvicorn
 requests
 beautifulsoup4
+
 rapidfuzz
+pytesseract
+Pillow

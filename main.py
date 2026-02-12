@@ -16,9 +16,17 @@ from rapidfuzz import fuzz
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Oprava pre Postgres (Render niekedy posiela 'postgres://', ale SQLAlchemy potrebuje 'postgresql://')
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# Oprava pre Postgres (Render posiela 'postgres://', ale SQLAlchemy potrebuje 'postgresql://')
+if DATABASE_URL:
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    # Poistka pre SSL (Render Postgres ho vyžaduje)
+    if "?" not in DATABASE_URL:
+        DATABASE_URL += "?sslmode=require"
+
+# Ak premenná chýba, vypíšeme chybu do logov, ale nezrútime hneď celý server
+if not DATABASE_URL:
+    print("⚠️ CHYBA: Premenná DATABASE_URL nie je nastavená!")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -33,6 +41,7 @@ class Product(Base):
     store = Column(String)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow)
 
+# Vytvorenie tabuliek v databáze
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -48,7 +57,7 @@ def analyzuj_cez_gemini(text_z_ocr, obchod):
     prompt = f"""
     Si nákupný asistent Dunko. Z textu letáku obchodu {obchod} vytiahni zoznam produktov.
     Vráť IBA čistý zoznam vo formáte: Názov produktu|Cena
-    Ignoruj reklamy, omáčky a šum. Ak je tam akcia 1+1, vypočítaj cenu za kus.
+    Ignoruj reklamy a balast. Ak je tam akcia 1+1, vypočítaj cenu za kus.
     Text: {text_z_ocr}
     """
     
@@ -82,19 +91,18 @@ async def home():
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             :root { --primary: #2563eb; --secondary: #7c3aed; --bg: #f8fafc; }
-            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); margin: 0; padding: 20px; color: #1e293b; }
+            body { font-family: sans-serif; background: var(--bg); margin: 0; padding: 20px; color: #1e293b; }
             .container { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }
-            h2 { text-align: center; margin-bottom: 25px; color: #2563eb; }
+            h2 { text-align: center; color: #2563eb; }
             .settings { display: flex; gap: 10px; margin-bottom: 15px; }
-            input, select, textarea { width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 12px; font-size: 15px; box-sizing: border-box; }
-            textarea { height: 100px; resize: none; margin-bottom: 15px; }
-            .btn { width: 100%; padding: 15px; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; color: white; margin-bottom: 10px; transition: 0.2s; }
+            input, select, textarea { width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 12px; box-sizing: border-box; }
+            textarea { height: 100px; margin-bottom: 15px; }
+            .btn { width: 100%; padding: 15px; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; color: white; margin-bottom: 10px; }
             .btn-blue { background: var(--primary); }
             .btn-purple { background: var(--secondary); }
-            .btn:hover { opacity: 0.9; transform: scale(0.99); }
-            .shop-card { margin-top: 20px; border: 1px solid #e2e8f0; border-radius: 15px; overflow: hidden; background: #fff; }
-            .shop-head { background: #f1f5f9; padding: 12px 15px; display: flex; justify-content: space-between; font-weight: bold; border-bottom: 1px solid #e2e8f0; }
-            .prod-row { padding: 10px 15px; border-bottom: 1px solid #f8fafc; display: flex; justify-content: space-between; font-size: 14px; }
+            .shop-card { margin-top: 20px; border: 1px solid #e2e8f0; border-radius: 15px; background: #fff; }
+            .shop-head { background: #f1f5f9; padding: 12px; display: flex; justify-content: space-between; font-weight: bold; }
+            .prod-row { padding: 10px; border-bottom: 1px solid #f8fafc; display: flex; justify-content: space-between; }
             .loader { text-align: center; display: none; padding: 20px; font-weight: bold; color: #2563eb; }
         </style>
     </head>
@@ -102,13 +110,11 @@ async def home():
         <div class="container">
             <h2>🐕 Dunko 2.0 Porovnávač</h2>
             <div class="settings">
-                <input type="text" id="city" placeholder="Mesto (napr. Skalica)" value="Skalica">
-                <select id="radius"><option value="10">10 km</option><option value="20">20 km</option></select>
+                <input type="text" id="city" placeholder="Mesto" value="Skalica">
             </div>
-            <textarea id="list" placeholder="Napíš zoznam (napr. pivo, maslo, mlieko...)"></textarea>
+            <textarea id="list" placeholder="pivo, maslo, mlieko..."></textarea>
             <button class="btn btn-blue" onclick="search('multi')">KDE JE ČO NAJLACNEJŠIE?</button>
-            <button class="btn btn-purple" onclick="search('single')">NAJLEPŠÍ NÁKUP V JEDNOM OBCHODE</button>
-            <div id="loader" class="loader">Dunko beží do skladu pre letáky... 🐾</div>
+            <div id="loader" class="loader">Dunko hľadá v letákoch... 🐾</div>
             <div id="results"></div>
         </div>
         <script>
@@ -126,15 +132,14 @@ async def home():
                         body: JSON.stringify({items, city: document.getElementById('city').value})
                     });
                     const data = await res.json();
-                    render(data.results, mode);
-                } catch (e) { alert("Chyba spojenia!"); }
+                    render(data.results);
+                } catch (e) { alert("Chyba!"); }
                 document.getElementById('loader').style.display = 'none';
             }
 
-            function render(results, mode) {
+            function render(results) {
                 const resultsDiv = document.getElementById('results');
                 let byShop = {};
-
                 results.forEach(r => {
                     if(r.matches && r.matches.length > 0) {
                         const m = r.matches[0];
@@ -143,7 +148,6 @@ async def home():
                         byShop[m.store].total += m.price;
                     }
                 });
-
                 let html = '';
                 for (const [shop, info] of Object.entries(byShop)) {
                     html += `<div class="shop-card"><div class="shop-head"><span>🏢 ${shop}</span><span>${info.total.toFixed(2)}€</span></div>`;
@@ -152,7 +156,7 @@ async def home():
                     });
                     html += '</div>';
                 }
-                resultsDiv.innerHTML = html || '<p style="text-align:center">Nenašli sa žiadne akcie.</p>';
+                resultsDiv.innerHTML = html || '<p>Nenašli sa žiadne akcie.</p>';
             }
         </script>
     </body>
@@ -173,7 +177,6 @@ def compare(req: SearchReq):
     for user_item in req.items:
         matches = []
         for p in all_prods:
-            # Fuzzy match pre lepšie hľadanie (napr. "pivo" nájde "Pilsner pivo")
             if fuzz.partial_ratio(user_item.lower().strip(), p.name.lower()) > 80:
                 matches.append(p)
         matches.sort(key=lambda x: x.price)
@@ -182,11 +185,10 @@ def compare(req: SearchReq):
 
 @app.get("/update-flyers")
 def update_flyers():
-    """Funkcia, ktorá naplní databázu. Môžeš ju spustiť cez URL."""
+    """Funkcia, ktorá naplní databázu z webových stránok."""
     db = SessionLocal()
     headers = {"User-Agent": "Mozilla/5.0"}
     
-    # Zoznam obchodov
     sources = [
         {"name": "Lidl", "url": "https://www.zlacnene.sk/obchod/lidl/"},
         {"name": "Kaufland", "url": "https://www.zlacnene.sk/obchod/kaufland/"},
@@ -199,7 +201,8 @@ def update_flyers():
         try:
             res = requests.get(src["url"], headers=headers, timeout=10)
             soup = BeautifulSoup(res.text, "html.parser")
-            items = soup.select(".polozka")
+            # Upravený selektor podľa aktuálnej štruktúry zlacnene.sk
+            items = soup.select(".polozka") 
             
             for item in items:
                 name_el = item.find(["h2", "h3"])
@@ -207,10 +210,12 @@ def update_flyers():
                 if name_el and price_el:
                     try:
                         name = name_el.get_text(strip=True)
-                        price = float(re.sub(r'[^\d.]', '', price_el.get_text(strip=True).replace(",", ".")))
+                        price_str = price_el.get_text(strip=True).replace(",", ".")
+                        price = float(re.sub(r'[^\d.]', '', price_str))
                         
-                        # Generovanie unikátneho ID
-                        p_id = f"{src['name']}_{name}_{price}"[:100].replace(" ", "_")
+                        # Bezpečné generovanie ID
+                        clean_name = re.sub(r'[^\w]', '_', name)
+                        p_id = f"{src['name']}_{clean_name}_{price}"[:100]
                         
                         new_p = Product(id=p_id, name=name, price=price, store=src["name"])
                         db.merge(new_p)

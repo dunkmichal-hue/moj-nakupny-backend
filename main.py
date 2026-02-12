@@ -1,20 +1,3 @@
-Rozumiem, urobíme z toho poriadnu "nadupanú" verziu. Pridal som všetko, čo sme spomínali:
-
-Zoznam podľa obchodov (pôvodná požiadavka).
-
-Tlačidlo "Najlepší nákup v jednom obchode" (vypočíta, kde kúpiš najviac vecí naraz a za koľko).
-
-Local Storage (zoznam ti nezmizne, keď omylom zatvoríš prehliadač).
-
-Checkboxy (odškrtávanie vecí v obchode).
-
-Hlasové zadávanie (mikrofón pre diktovanie zoznamu).
-
-Created by Dunko (tvoj podpis).
-
-Tu je tvoj finálny, kompletný main.py:
-
-Python
 import os
 import requests
 from bs4 import BeautifulSoup
@@ -67,7 +50,6 @@ def get_live_data():
         return products
     except: return []
 
-# --- FRONTEND (GUI) ---
 @app.get("/", response_class=HTMLResponse)
 def get_gui():
     return """
@@ -106,39 +88,21 @@ def get_gui():
         <div class="container">
             <h2>🛒 Nákupný Asistent</h2>
             <textarea id="items" placeholder="mlieko, maslo, kuracie prsia..."></textarea>
-            
             <div class="controls">
                 <button class="btn-all" onclick="search('multi')">KDE JE ČO NAJLACNEJŠIE? (Viac obchodov)</button>
                 <button class="btn-single" onclick="search('single')">NAJLEPŠÍ NÁKUP V JEDNOM OBCHODE</button>
                 <button class="btn-mic" onclick="startVoice()">🎤 DIKTOVAŤ</button>
                 <button class="btn-clear" onclick="clearAll()">🗑️ VYMAZAŤ</button>
             </div>
-
             <div id="loader" class="loader">Hľadám v letákoch... 📑</div>
             <div id="results"></div>
         </div>
         <footer>Created by <b>Dunko</b></footer>
-
         <script>
             const textarea = document.getElementById('items');
-
-            // Načítanie z pamäte pri štarte
-            window.onload = () => {
-                textarea.value = localStorage.getItem('myList') || '';
-            };
-
-            textarea.oninput = () => {
-                localStorage.setItem('myList', textarea.value);
-            };
-
-            function clearAll() {
-                if(confirm("Naozaj vymazať zoznam?")) {
-                    textarea.value = '';
-                    localStorage.removeItem('myList');
-                    document.getElementById('results').innerHTML = '';
-                }
-            }
-
+            window.onload = () => { textarea.value = localStorage.getItem('myList') || ''; };
+            textarea.oninput = () => { localStorage.setItem('myList', textarea.value); };
+            function clearAll() { if(confirm("Naozaj vymazať zoznam?")) { textarea.value = ''; localStorage.removeItem('myList'); document.getElementById('results').innerHTML = ''; } }
             function startVoice() {
                 const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
                 recognition.lang = 'sk-SK';
@@ -149,14 +113,11 @@ def get_gui():
                 };
                 recognition.start();
             }
-
             async function search(mode) {
                 const input = textarea.value;
                 if(!input) return alert("Napíš zoznam!");
-                
                 document.getElementById('loader').style.display = 'block';
                 document.getElementById('results').innerHTML = '';
-
                 const items = input.split(',').map(i => i.trim());
                 try {
                     const res = await fetch('/compare', {
@@ -166,17 +127,12 @@ def get_gui():
                     });
                     const data = await res.json();
                     renderResults(data.results, mode);
-                } catch (e) {
-                    alert("Chyba servera!");
-                }
+                } catch (e) { alert("Chyba servera!"); }
                 document.getElementById('loader').style.display = 'none';
             }
-
-            def renderResults(results, mode) {
+            function renderResults(results, mode) {
                 const byShop = {};
-                
                 if (mode === 'multi') {
-                    // Logika: Pre každú vec nájdi absolútne najlacnejšiu možnosť
                     results.forEach(r => {
                         if(r.matches.length > 0) {
                             const best = r.matches[0];
@@ -186,7 +142,6 @@ def get_gui():
                         }
                     });
                 } else {
-                    // Logika: Jeden obchod, ktorý pokryje najviac položiek
                     const shopScores = {};
                     results.forEach(r => {
                         r.matches.forEach(m => {
@@ -196,32 +151,18 @@ def get_gui():
                             shopScores[m.store].items.push({ orig: r.item, found: m.name, price: m.price });
                         });
                     });
-                    
-                    // Vyberieme víťazný obchod (ten s najviac položkami, potom podľa ceny)
                     let winnerShop = Object.keys(shopScores).sort((a,b) => shopScores[b].count - shopScores[a].count || shopScores[a].total - shopScores[b].total)[0];
                     if(winnerShop) byShop[winnerShop] = shopScores[winnerShop];
                 }
-
                 let html = '';
                 for (const [shop, info] of Object.entries(byShop)) {
-                    html += `<div class="shop-section">
-                        <div class="shop-header ${mode === 'single' ? 'single' : ''}">
-                            <span>🏢 ${shop}</span>
-                            <span>${info.total.toFixed(2)}€</span>
-                        </div>`;
-                    info.items.forEach((i, idx) => {
-                        html += `
-                        <div class="item-row">
-                            <input type="checkbox" onclick="this.parentElement.classList.toggle('strikethrough')">
-                            <div class="item-info">
-                                <div class="item-name"><b>${i.orig}</b> <small>(${i.found})</small></div>
-                            </div>
-                            <div class="item-price">${i.price.toFixed(2)}€</div>
-                        </div>`;
+                    html += `<div class="shop-section"><div class="shop-header ${mode === 'single' ? 'single' : ''}"><span>🏢 ${shop}</span><span>${info.total.toFixed(2)}€</span></div>`;
+                    info.items.forEach(i => {
+                        html += `<div class="item-row"><input type="checkbox" onclick="this.parentElement.classList.toggle('strikethrough')"><div class="item-info"><div class="item-name"><b>${i.orig}</b> <small>(${i.found})</small></div></div><div class="item-price">${i.price.toFixed(2)}€</div></div>`;
                     });
                     html += `</div>`;
                 }
-                document.getElementById('results').innerHTML = html || '<p style="text-align:center;">Nenašli sa žiadne akcie.</p>';
+                document.getElementById('results').innerHTML = html || '<p style="text-align:center; padding:20px;">Nenašli sa žiadne akcie.</p>';
             }
         </script>
     </body>
@@ -242,3 +183,8 @@ def compare_prices(req: SearchRequest):
         matches.sort(key=lambda x: x["price"])
         results.append({"item": user_item, "matches": matches})
     return {"results": results}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

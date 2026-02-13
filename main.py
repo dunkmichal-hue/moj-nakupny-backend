@@ -1,135 +1,125 @@
-import os, re, requests, datetime, time
+import os, requests, json
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List
-from sqlalchemy import create_engine, Column, String, Float, DateTime, text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from bs4 import BeautifulSoup
 
-# --- 1. INICIALIZÁCIA APP (MUSÍ BYŤ PRVÁ) ---
+# --- 1. ZÁKLADNÁ INICIALIZÁCIA ---
 app = FastAPI()
-Base = declarative_base()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# --- 2. SCHÉMY A MODELY ---
 class SearchReq(BaseModel):
     items: List[str]
     city: str
 
-class Product(Base):
-    __tablename__ = "products"
-    id = Column(String, primary_key=True)
-    name = Column(String)
-    price = Column(Float)
-    store = Column(String)
-    category = Column(String)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-# --- 3. DATABÁZA A OPRAVA STĹPCA ---
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
-
-# Vytvoríme tabuľky a následne poistka pre stĺpec category
-Base.metadata.create_all(bind=engine)
-
-with engine.connect() as conn:
-    try:
-        conn.execute(text("ALTER TABLE products ADD COLUMN category VARCHAR"))
-        conn.commit()
-    except Exception:
-        pass # Ak už existuje, nič sa nedeje
-
-# --- 4. POMOCNÉ FUNKCIE ---
-def zisti_kategoriu(nazov):
-    if not GEMINI_API_KEY: return "ostatné"
+# --- 2. AI MOZOG (GEMINI) ---
+def volaj_gemini(items: List[str], mode: str):
+    if not GEMINI_API_KEY:
+        return {"error": "Chýba API kľúč"}
+    
+    zoznam = ", ".join(items)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    prompt = f"Zarď produkt '{nazov}' do 1 kategórie (mäso, pečivo, pivo, mliečne, ovocie, drogéria). Odpovedaj 1 slovom."
+    
+    # Prompt vyžaduje od Gemini čistý JSON formát, aby ho frontend vedel spracovať
+    prompt = f"""
+    Si nákupný asistent Dunko pre mesto Skalica. 
+    Používateľ chce nakúpiť: {zoznam}. Režim: {mode}.
+    Vráť IBA čistý JSON objekt (nič iné!) v tomto formáte:
+    {{
+      "total_price": 0.0,
+      "stores": {{
+        "Tesco Skalica": [{{ "name": "názov", "price": 1.2, "category": "kategória" }}],
+        "Lidl": [...],
+        "Kaufland": [...]
+      }}
+    }}
+    Ak je režim 'split', rozdeľ položky tam, kde sú najlacnejšie. Ak 'single', daj všetky do jedného obchodu, ktorý je celkovo najlacnejší.
+    Použi svoje vedomosti o aktuálnych akciách pre február 2026.
+    """
+    
     try:
-        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=5)
-        return res.json()['candidates'][0]['content']['parts'][0]['text'].strip().lower()
-    except: return "ostatné"
+        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=20)
+        raw_text = res.json()['candidates'][0]['content']['parts'][0]['text']
+        # Vyčistenie textu od prípadných markdown značiek ```json
+        clean_json = raw_text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean_json)
+    except Exception as e:
+        return {"error": str(e)}
 
-# --- 5. TRASY (ROUTES) ---
-
-@app.get("/update-flyers")
-def update_flyers():
-    db = SessionLocal()
-    # Čistý stôl: vymažeme staré nekompletné záznamy
-    db.query(Product).delete()
-    db.commit()
-    
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    sources = [
-        {"name": "Tesco Skalica", "url": "https://www.tesco.sk/akciove-ponuky/akciove-produkty/tesco-hypermarket-skalica", "sel": ".product-list--list-item"},
-        {"name": "Kaufland", "url": "https://predajne.kaufland.sk/aktualna-ponuka/prehlad.html", "sel": ".m-offer-tile"},
-        {"name": "Lidl", "url": "https://www.lidl.sk/q/query/zlavy", "sel": ".product-grid__item"}
-    ]
-    
-    added_total = 0
-    for src in sources:
-        try:
-            res = requests.get(src["url"], headers=headers, timeout=12)
-            soup = BeautifulSoup(res.text, "html.parser")
-            items = soup.select(src["sel"])
-            
-            for item in items[:25]:
-                name_el = item.select_one("h2, h3, .product-title, .offer-tile__title")
-                price_el = item.select_one(".price, .product-price, .offer-tile__price")
-                
-                if name_el and price_el:
-                    name = name_el.get_text(strip=True)
-                    price_raw = price_el.get_text(strip=True).replace(",", ".")
-                    price = float(re.sub(r'[^\d.]', '', price_raw))
-                    
-                    # AI kategorizácia pre lepšie hľadanie
-                    kat = zisti_kategoriu(name)
-                    
-                    p_id = f"{src['name']}_{abs(hash(name+str(price)))}"
-                    db.add(Product(id=p_id, name=name, price=price, store=src["name"], category=kat))
-                    added_total += 1
-                    time.sleep(0.3)
-            db.commit()
-        except: continue
-            
-    db.close()
-    return {"status": f"Dunko vyčistil databázu a nahral {added_total} nových akcií!"}
-
+# --- 3. TRASY (ROUTES) ---
 @app.post("/compare")
-def compare(req: SearchReq):
-    db = SessionLocal()
-    q_items = [i.strip() for i in req.items if i.strip()]
-    
-    # Možnosť A: Rozdelený nákup (Najlacnejšie kúsky)
-    split_data = {"stores": {}, "total": 0.0}
-    for item in q_items:
-        match = db.query(Product).filter((Product.name.ilike(f"%{item}%")) | (Product.category == item.lower())).order_by(Product.price).first()
-        if match:
-            if match.store not in split_data["stores"]: split_data["stores"][match.store] = []
-            split_data["stores"][match.store].append({"n": match.name, "p": match.price, "c": match.category})
-            split_data["total"] += match.price
-
-    # Možnosť B: Jeden obchod (Pohodlie)
-    single_data = {}
-    for s in ["Tesco Skalica", "Kaufland", "Lidl"]:
-        total, count, missing = 0.0, 0, []
-        for item in q_items:
-            m = db.query(Product).filter(Product.store == s).filter((Product.name.ilike(f"%{item}%")) | (Product.category == item.lower())).order_by(Product.price).first()
-            if m:
-                total += m.price
-                count += 1
-            else: missing.append(item)
-        single_data[s] = {"total": round(total, 2), "count": count, "missing": missing}
-
-    db.close()
-    return {"split": split_data, "single": single_data}
+async def compare(req: SearchReq, mode: str = "split"):
+    # Dunko teraz namiesto DB volá priamo Gemini
+    vysledok = volaj_gemini(req.items, mode)
+    return vysledok
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    # Tu zostáva tvoj HTML kód s tlačidlami
-    return "..."
+    return """
+    <html>
+        <head>
+            <title>Dunko AI Strategist</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body { font-family: sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }
+                .card { background: white; padding: 25px; border-radius: 15px; max-width: 600px; margin: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+                textarea { width: 100%; height: 80px; padding: 10px; border-radius: 10px; border: 1px solid #ddd; margin-bottom: 10px; }
+                .btn-box { display: flex; gap: 10px; margin-bottom: 20px; }
+                button { flex: 1; padding: 12px; cursor: pointer; border-radius: 8px; border: none; font-weight: bold; background: #2563eb; color: white; }
+                .btn-outline { background: white; color: #2563eb; border: 2px solid #2563eb; }
+                .store-card { background: #fff; margin: 15px 0; padding: 15px; border-radius: 10px; border-left: 5px solid #2563eb; text-align: left; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+                .item { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
+                .tag { font-size: 10px; background: #e0e7ff; padding: 2px 6px; border-radius: 10px; margin-left: 5px; }
+                input[type="checkbox"] { transform: scale(1.2); margin-right: 10px; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>🐕 Dunko Nákupný Zoznam (AI)</h2>
+                <textarea id="list" placeholder="Napíš zoznam (napr. mäso, pečivo, pivo...)"></textarea>
+                <div class="btn-box">
+                    <button onclick="search('split')">Rozdelený nákup</button>
+                    <button class="btn-outline" onclick="search('single')">Jeden obchod</button>
+                </div>
+                <div id="results"></div>
+            </div>
+
+            <script>
+                async function search(mode) {
+                    const input = document.getElementById('list').value;
+                    const resDiv = document.getElementById('results');
+                    if(!input) return;
+                    
+                    resDiv.innerHTML = "Dunko prehľadáva letáky... 🐾";
+                    const items = input.split(',').map(i => i.trim());
+                    
+                    try {
+                        const response = await fetch(`/compare?mode=${mode}`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({items: items, city: 'Skalica'})
+                        });
+                        const data = await response.json();
+                        
+                        let html = `<h3>Celková cena: ${data.total_price.toFixed(2)}€</h3>`;
+                        for (const [store, prods] of Object.entries(data.stores)) {
+                            if (prods.length === 0) continue;
+                            html += `<div class="store-card"><b>📍 ${store}</b>`;
+                            prods.forEach(p => {
+                                html += `<div class="item">
+                                    <span><input type="checkbox"> ${p.name} <span class="tag">${p.category}</span></span>
+                                    <b>${p.price.toFixed(2)}€</b>
+                                </div>`;
+                            });
+                            html += `</div>`;
+                        }
+                        resDiv.innerHTML = html;
+                    } catch(e) {
+                        resDiv.innerHTML = "Chyba: Gemini je preťažená alebo zlyhalo pripojenie.";
+                    }
+                }
+            </script>
+        </body>
+    </html>
+    """
